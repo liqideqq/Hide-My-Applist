@@ -2,12 +2,12 @@ name: Main
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
     paths-ignore:
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/workflows/issue.yml'
       - '**.md'
-
+  workflow_dispatch:  # 添加这一行
 jobs:
   build:
     name: Build on ${{ matrix.os }}
