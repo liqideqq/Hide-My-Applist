@@ -9,120 +9,116 @@ import com.github.kyuubiran.ezxhelper.utils.hookBefore
 import de.robv.android.xposed.XC_MethodHook
 import icu.nullptr.hidemyapplist.common.Constants
 import icu.nullptr.hidemyapplist.xposed.*
-import java.util.concurrent.atomic.AtomicReference
 
-@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-class PmsHookTarget34(private val service: HMAService) : IFrameworkHook {
+abstract class BasePmsHook(private val service: HMAService) : IFrameworkHook {
+    // 公共逻辑抽象
+    protected abstract val targetClass: String
+    protected abstract fun getCallingApps(snapshot: Any, callingUid: Int): Array<String>?
+    
+    override fun load() {
+        // 公共Hook逻辑
+        findMethod(targetClass, findSuper = true) { 
+            name == "shouldFilterApplication" 
+        }.hookBefore { param ->
+            runCatching {
+                val snapshot = param.args[0]
+                val callingUid = param.args[1] as Int
+                if (callingUid == Constants.UID_SYSTEM) return@hookBefore
+                
+                val callingApps = getCallingApps(snapshot, callingUid) ?: return@hookBefore
+                val targetApp = Utils.getPackageNameFromPackageSettings(param.args[3])
 
-    companion object {
-        private const val TAG = "PmsHookTarget34"
+                callingApps.firstOrNull { service.shouldHide(it, targetApp) }?.let {
+                    param.result = true
+                    service.filterCount++
+                    logFilteredApp(callingUid, it, targetApp, "shouldFilterApplication")
+                    return@hookBefore
+                }
+            }.onFailure { handleError(it) }
+        }
     }
+
+    // 公共工具方法
+    protected fun logFilteredApp(uid: Int, caller: String, target: String, method: String) {
+        logD("PmsHook", "@$method caller: $uid $caller, target: $target")
+    }
+
+    protected fun handleError(t: Throwable) {
+        logE("PmsHook", "Fatal error occurred", t)
+        unload()
+    }
+
+    override fun unload() {}
+}
+
+// SDK 34+ 实现
+@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+class PmsHookTarget34(service: HMAService) : BasePmsHook(service) {
+    override val targetClass = "com.android.server.pm.AppsFilterImpl"
 
     private val getPackagesForUidMethod by lazy {
-        findMethod("com.android.server.pm.Computer") {
-            name == "getPackagesForUid"
+        findMethod("com.android.server.pm.Computer") { 
+            name == "getPackagesForUid" 
         }
     }
 
-    private var hook: XC_MethodHook.Unhook? = null
-    private var userHook: XC_MethodHook.Unhook? = null
     private var exphook: XC_MethodHook.Unhook? = null
-    private var lastFilteredApp: AtomicReference<String?> = AtomicReference(null)
 
-    @Suppress("UNCHECKED_CAST")
+    override fun getCallingApps(snapshot: Any, callingUid: Int): Array<String>? {
+        return Utils.binderLocalScope {
+            getPackagesForUidMethod.invoke(snapshot, callingUid) as? Array<String>
+        }
+    }
+
     override fun load() {
-        logI(TAG, "Load hook")
-
-        // Hook shouldFilterApplication
-        hook = findMethod("com.android.server.pm.AppsFilterImpl", findSuper = true) {
-            name == "shouldFilterApplication"
-        }.hookBefore { param ->
-            runCatching {
-                val snapshot = param.args[0]
-                val callingUid = param.args[1] as Int
-                if (callingUid == Constants.UID_SYSTEM) return@hookBefore
-                val callingApps = Utils.binderLocalScope {
-                    getPackagesForUidMethod.invoke(snapshot, callingUid) as Array<String>?
-                } ?: return@hookBefore
-                val targetApp = Utils.getPackageNameFromPackageSettings(param.args[3])
-                for (caller in callingApps) {
-                    if (service.shouldHide(caller, targetApp)) {
-                        param.result = true
-                        service.filterCount++
-                        val last = lastFilteredApp.getAndSet(caller)
-                        if (last != caller) logI(TAG, "@shouldFilterApplication: query from $caller")
-                        logD(TAG, "@shouldFilterApplication caller: $callingUid $caller, target: $targetApp")
-                        return@hookBefore
-                    }
-                }
-            }.onFailure {
-                logE(TAG, "Fatal error occurred, disable hooks", it)
-                unload()
-            }
-        }
-
-        // Hook shouldFilterApplicationForUser (for targetSdkVersion=29 apps)
-        userHook = findMethod("com.android.server.pm.AppsFilterImpl", findSuper = true) {
-            name == "shouldFilterApplicationForUser"
-        }.hookBefore { param ->
-            runCatching {
-                val snapshot = param.args[0]
-                val callingUid = param.args[1] as Int
-                if (callingUid == Constants.UID_SYSTEM) return@hookBefore
-                val callingApps = Utils.binderLocalScope {
-                    getPackagesForUidMethod.invoke(snapshot, callingUid) as Array<String>?
-                } ?: return@hookBefore
-                val targetApp = Utils.getPackageNameFromPackageSettings(param.args[4])
-                for (caller in callingApps) {
-                    if (service.shouldHide(caller, targetApp)) {
-                        param.result = true
-                        service.filterCount++
-                        val last = lastFilteredApp.getAndSet(caller)
-                        if (last != caller) logI(TAG, "@shouldFilterApplicationForUser: query from $caller")
-                        logD(TAG, "@shouldFilterApplicationForUser caller: $callingUid $caller, target: $targetApp")
-                        return@hookBefore
-                    }
-                }
-            }.onFailure {
-                logE(TAG, "Fatal error occurred, disable hooks", it)
-                unload()
-            }
-        }
-
-        // Hook getArchivedPackageInternal (14 QPR2+)
-        exphook = findMethodOrNull("com.android.server.pm.PackageManagerService", findSuper = true) {
-            name == "getArchivedPackageInternal"
+        super.load()
+        // Android 14特有逻辑
+        findMethodOrNull("com.android.server.pm.PackageManagerService") { 
+            name == "getArchivedPackageInternal" 
         }?.hookBefore { param ->
             runCatching {
                 val callingUid = Binder.getCallingUid()
                 if (callingUid == Constants.UID_SYSTEM) return@hookBefore
-                val callingApps = Utils.binderLocalScope {
-                    service.pms.getPackagesForUid(callingUid)
-                } ?: return@hookBefore
-                val targetApp = param.args[0].toString()
-                for (caller in callingApps) {
-                    if (service.shouldHide(caller, targetApp)) {
-                        param.result = null
-                        service.filterCount++
-                        val last = lastFilteredApp.getAndSet(caller)
-                        if (last != caller) logI(TAG, "@getArchivedPackageInternal: query from $caller")
-                        logD(TAG, "@getArchivedPackageInternal caller: $callingUid $caller, target: $targetApp")
-                        return@hookBefore
-                    }
+                
+                service.pms.getPackagesForUid(callingUid)?.firstOrNull { 
+                    service.shouldHide(it, param.args[0].toString()) 
+                }?.let {
+                    param.result = null
+                    service.filterCount++
+                    logFilteredApp(callingUid, it, param.args[0].toString(), "getArchivedPackageInternal")
                 }
-            }.onFailure {
-                logE(TAG, "Fatal error occurred, disable hooks", it)
-                unload()
-            }
-        }
+            }.onFailure { handleError(it) }
+        }?.also { exphook = it }
     }
 
     override fun unload() {
-        hook?.unhook()
-        hook = null
-        userHook?.unhook()
-        userHook = null
+        super.unload()
         exphook?.unhook()
-        exphook = null
+    }
+}
+
+// SDK 29-33 实现
+class PmsHookTarget29(service: HMAService) : BasePmsHook(service) {
+    override val targetClass = "com.android.server.pm.PackageManagerService"
+
+    override fun getCallingApps(snapshot: Any, callingUid: Int): Array<String>? {
+        return Utils.binderLocalScope {
+            // SDK29中getPackagesForUid直接位于PackageManagerService
+            findMethod(targetClass) { 
+                name == "getPackagesForUid" && parameterTypes.contentEquals(arrayOf(Int::class.java)) 
+            }.invoke(snapshot, callingUid) as? Array<String>
+        }
+    }
+}
+
+// 入口加载逻辑
+fun loadHook(service: HMAService) {
+    when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> 
+            PmsHookTarget34(service).load()
+        Build.VERSION.SDK_INT in 29..33 -> 
+            PmsHookTarget29(service).load()
+        else -> 
+            logE("PmsHook", "Unsupported Android version: ${Build.VERSION.SDK_INT}")
     }
 }
