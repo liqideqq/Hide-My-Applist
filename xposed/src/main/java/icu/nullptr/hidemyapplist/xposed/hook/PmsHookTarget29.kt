@@ -1,44 +1,54 @@
 package icu.nullptr.hidemyapplist.xposed.hook
 
-import android.content.pm.ResolveInfo
+import android.os.Binder
+import android.os.Build
+import androidx.annotation.RequiresApi
 import com.github.kyuubiran.ezxhelper.utils.findMethod
-import com.github.kyuubiran.ezxhelper.utils.hookAfter
+import com.github.kyuubiran.ezxhelper.utils.findMethodOrNull
 import com.github.kyuubiran.ezxhelper.utils.hookBefore
 import de.robv.android.xposed.XC_MethodHook
 import icu.nullptr.hidemyapplist.common.Constants
 import icu.nullptr.hidemyapplist.xposed.*
 import java.util.concurrent.atomic.AtomicReference
 
+@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 class PmsHookTarget29(private val service: HMAService) : IFrameworkHook {
 
     companion object {
         private const val TAG = "PmsHookTarget29"
     }
 
-    private val hooks = mutableListOf<XC_MethodHook.Unhook>()
+    private val getPackagesForUidMethod by lazy {
+        findMethod("com.android.server.pm.Computer") {
+            name == "getPackagesForUid"
+        }
+    }
+
+    private var hook: XC_MethodHook.Unhook? = null
+    private var exphook: XC_MethodHook.Unhook? = null
     private var lastFilteredApp: AtomicReference<String?> = AtomicReference(null)
 
     @Suppress("UNCHECKED_CAST")
     override fun load() {
         logI(TAG, "Load hook")
-        hooks += findMethod(service.pms::class.java, findSuper = true) {
-            name == "filterAppAccessLPr" && parameterCount == 5
+        hook = findMethod("com.android.server.pm.AppsFilterImpl", findSuper = true) {
+            name == "shouldFilterApplication"
         }.hookBefore { param ->
             runCatching {
+                val snapshot = param.args[0]
                 val callingUid = param.args[1] as Int
                 if (callingUid == Constants.UID_SYSTEM) return@hookBefore
                 val callingApps = Utils.binderLocalScope {
-                    service.pms.getPackagesForUid(callingUid)
+                    getPackagesForUidMethod.invoke(snapshot, callingUid) as Array<String>?
                 } ?: return@hookBefore
-                val packageSettings = param.args[0] ?: return@hookBefore
-                val targetApp = Utils.getPackageNameFromPackageSettings(packageSettings)
+                val targetApp = Utils.getPackageNameFromPackageSettings(param.args[3]) // PackageSettings <- PackageStateInternal
                 for (caller in callingApps) {
                     if (service.shouldHide(caller, targetApp)) {
                         param.result = true
                         service.filterCount++
                         val last = lastFilteredApp.getAndSet(caller)
-                        if (last != caller) logI(TAG, "@filterAppAccessLPr query from $caller")
-                        logD(TAG, "@filterAppAccessLPr caller: $callingUid $caller, target: $targetApp")
+                        if (last != caller) logI(TAG, "@shouldFilterApplication: query from $caller")
+                        logD(TAG, "@shouldFilterApplication caller: $callingUid $caller, target: $targetApp")
                         return@hookBefore
                     }
                 }
@@ -47,32 +57,28 @@ class PmsHookTarget29(private val service: HMAService) : IFrameworkHook {
                 unload()
             }
         }
-        hooks += findMethod(service.pms::class.java, findSuper = true) {
-            name == "applyPostResolutionFilter"
-        }.hookAfter { param ->
+        // AOSP exploit - https://github.com/aosp-mirror/platform_frameworks_base/commit/5bc482bd99ea18fe0b4064d486b29d5ae2d65139
+        // Only 14 QPR2+ has this method
+        exphook = findMethodOrNull("com.android.server.pm.PackageManagerService", findSuper = true) {
+            name == "getArchivedPackageInternal"
+        }?.hookBefore { param ->
             runCatching {
-                val callingUid = param.args[3] as Int
-                if (callingUid == Constants.UID_SYSTEM) return@hookAfter
+                val callingUid = Binder.getCallingUid()
+                if (callingUid == Constants.UID_SYSTEM) return@hookBefore
                 val callingApps = Utils.binderLocalScope {
                     service.pms.getPackagesForUid(callingUid)
-                } ?: return@hookAfter
-                val list = param.result as MutableCollection<ResolveInfo>
-                val listToRemove = mutableSetOf<ResolveInfo>()
-                for (resolveInfo in list) {
-                    val targetApp = with(resolveInfo) {
-                        activityInfo?.packageName ?: serviceInfo?.packageName ?: providerInfo?.packageName ?: resolvePackageName
-                    }
-                    for (caller in callingApps) {
-                        if (service.shouldHide(caller, targetApp)) {
-                            val last = lastFilteredApp.getAndSet(caller)
-                            if (last != caller) logI(TAG, "@applyPostResolutionFilter query from $caller")
-                            logD(TAG, "@applyPostResolutionFilter caller: $callingUid $caller, target: $targetApp")
-                            listToRemove.add(resolveInfo)
-                            break
-                        }
+                } ?: return@hookBefore
+                val targetApp = param.args[0].toString()
+                for (caller in callingApps) {
+                    if (service.shouldHide(caller, targetApp)) {
+                        param.result = null
+                        service.filterCount++
+                        val last = lastFilteredApp.getAndSet(caller)
+                        if (last != caller) logI(TAG, "@getArchivedPackageInternal: query from $caller")
+                        logD(TAG, "@getArchivedPackageInternal caller: $callingUid $caller, target: $targetApp")
+                        return@hookBefore
                     }
                 }
-                list.removeAll(listToRemove)
             }.onFailure {
                 logE(TAG, "Fatal error occurred, disable hooks", it)
                 unload()
@@ -81,7 +87,9 @@ class PmsHookTarget29(private val service: HMAService) : IFrameworkHook {
     }
 
     override fun unload() {
-        hooks.forEach(XC_MethodHook.Unhook::unhook)
-        hooks.clear()
+        hook?.unhook()
+        hook = null
+        exphook?.unhook()
+        exphook = null
     }
 }
