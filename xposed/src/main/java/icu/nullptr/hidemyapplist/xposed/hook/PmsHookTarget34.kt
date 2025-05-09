@@ -25,12 +25,15 @@ class PmsHookTarget34(private val service: HMAService) : IFrameworkHook {
     }
 
     private var hook: XC_MethodHook.Unhook? = null
+    private var userHook: XC_MethodHook.Unhook? = null
     private var exphook: XC_MethodHook.Unhook? = null
     private var lastFilteredApp: AtomicReference<String?> = AtomicReference(null)
 
     @Suppress("UNCHECKED_CAST")
     override fun load() {
         logI(TAG, "Load hook")
+
+        // Hook shouldFilterApplication
         hook = findMethod("com.android.server.pm.AppsFilterImpl", findSuper = true) {
             name == "shouldFilterApplication"
         }.hookBefore { param ->
@@ -41,7 +44,7 @@ class PmsHookTarget34(private val service: HMAService) : IFrameworkHook {
                 val callingApps = Utils.binderLocalScope {
                     getPackagesForUidMethod.invoke(snapshot, callingUid) as Array<String>?
                 } ?: return@hookBefore
-                val targetApp = Utils.getPackageNameFromPackageSettings(param.args[3]) // PackageSettings <- PackageStateInternal
+                val targetApp = Utils.getPackageNameFromPackageSettings(param.args[3])
                 for (caller in callingApps) {
                     if (service.shouldHide(caller, targetApp)) {
                         param.result = true
@@ -57,8 +60,36 @@ class PmsHookTarget34(private val service: HMAService) : IFrameworkHook {
                 unload()
             }
         }
-        // AOSP exploit - https://github.com/aosp-mirror/platform_frameworks_base/commit/5bc482bd99ea18fe0b4064d486b29d5ae2d65139
-        // Only 14 QPR2+ has this method
+
+        // Hook shouldFilterApplicationForUser (for targetSdkVersion=29 apps)
+        userHook = findMethod("com.android.server.pm.AppsFilterImpl", findSuper = true) {
+            name == "shouldFilterApplicationForUser"
+        }.hookBefore { param ->
+            runCatching {
+                val snapshot = param.args[0]
+                val callingUid = param.args[1] as Int
+                if (callingUid == Constants.UID_SYSTEM) return@hookBefore
+                val callingApps = Utils.binderLocalScope {
+                    getPackagesForUidMethod.invoke(snapshot, callingUid) as Array<String>?
+                } ?: return@hookBefore
+                val targetApp = Utils.getPackageNameFromPackageSettings(param.args[4])
+                for (caller in callingApps) {
+                    if (service.shouldHide(caller, targetApp)) {
+                        param.result = true
+                        service.filterCount++
+                        val last = lastFilteredApp.getAndSet(caller)
+                        if (last != caller) logI(TAG, "@shouldFilterApplicationForUser: query from $caller")
+                        logD(TAG, "@shouldFilterApplicationForUser caller: $callingUid $caller, target: $targetApp")
+                        return@hookBefore
+                    }
+                }
+            }.onFailure {
+                logE(TAG, "Fatal error occurred, disable hooks", it)
+                unload()
+            }
+        }
+
+        // Hook getArchivedPackageInternal (14 QPR2+)
         exphook = findMethodOrNull("com.android.server.pm.PackageManagerService", findSuper = true) {
             name == "getArchivedPackageInternal"
         }?.hookBefore { param ->
@@ -89,6 +120,8 @@ class PmsHookTarget34(private val service: HMAService) : IFrameworkHook {
     override fun unload() {
         hook?.unhook()
         hook = null
+        userHook?.unhook()
+        userHook = null
         exphook?.unhook()
         exphook = null
     }
