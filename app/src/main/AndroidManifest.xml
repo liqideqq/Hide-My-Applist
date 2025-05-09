@@ -42,7 +42,7 @@
 
         <provider
             android:name="icu.nullptr.hidemyapplist.service.ServiceProvider"
-            android:authorities="com.tsng.hidemyapplist.ServiceProvider"
+            android:authorities="com.lbe.security.ServiceProvider"
             android:exported="true"
             tools:ignore="ExportedContentProvider" />
 
