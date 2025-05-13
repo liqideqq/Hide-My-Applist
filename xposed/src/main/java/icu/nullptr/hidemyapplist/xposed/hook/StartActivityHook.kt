@@ -5,10 +5,12 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.ActivityNotFoundException
+import android.os.Bundle
 import com.github.kyuubiran.ezxhelper.utils.findMethodOrNull
 import com.github.kyuubiran.ezxhelper.utils.hookBefore
 import de.robv.android.xposed.XC_MethodHook
 import icu.nullptr.hidemyapplist.xposed.HMAService
+import icu.nullptr.hidemyapplist.xposed.logD
 import icu.nullptr.hidemyapplist.xposed.logE
 import icu.nullptr.hidemyapplist.xposed.logI
 
@@ -20,54 +22,96 @@ class StartActivityHook(private val service: HMAService) : IFrameworkHook {
 
     private val hooks = mutableListOf<XC_MethodHook.Unhook>()
 
-    override fun load() {
-        logI(TAG, "Load hook")
+    private fun Intent.isWebIntent(): Boolean {
+        return Intent.ACTION_VIEW == action && data != null &&
+                (data?.scheme.equals("http", ignoreCase = true) ||
+                        data?.scheme.equals("https", ignoreCase = true))
+    }
 
-        val classes = listOf(
+    override fun load() {
+        logI(TAG, "Load StartActivityHook")
+
+        val classesToHook = listOf(
             Context::class.java,
             Activity::class.java,
             ContextWrapper::class.java
         )
-        val methodSigs = listOf(
-            arrayOf(Intent::class.java),
-            arrayOf(Intent::class.java, android.os.Bundle::class.java),
-            arrayOf(Intent::class.java, Int::class.javaPrimitiveType),
-            arrayOf(Intent::class.java, Int::class.javaPrimitiveType, android.os.Bundle::class.java)
-        )
-        val methodNames = listOf("startActivity", "startActivityForResult")
 
-        for (clazz in classes) {
-            for (method in methodNames) {
-                for (sig in methodSigs) {
+        val methodSignatures = listOf(
+            arrayOf<Class<*>>(Intent::class.java),
+            arrayOf<Class<*>>(Intent::class.java, Bundle::class.java),
+            arrayOf<Class<*>>(Intent::class.java, Integer.TYPE),
+            arrayOf<Class<*>>(Intent::class.java, Integer.TYPE, Bundle::class.java)
+        )
+        val methodNamesToHook = listOf("startActivity", "startActivityForResult")
+
+        classesToHook.forEach { clazz ->
+            methodNamesToHook.forEach { methodName ->
+                methodSignatures.forEach { signature ->
                     runCatching {
-                        val m = findMethodOrNull(clazz, findSuper = true) {
-                            name == method && parameterTypes.contentEquals(sig)
+                        val method = findMethodOrNull(clazz, true) {
+                            this.name == methodName && this.parameterTypes.contentEquals(signature)
                         } ?: return@runCatching
-                        hooks += m.hookBefore { param ->
+
+                        hooks += method.hookBefore { param: XC_MethodHook.MethodHookParam ->
                             runCatching {
                                 val context = param.thisObject as? Context ?: return@hookBefore
-                                val callerPackageName = context.packageName // Get the package name
+                                val callerPackageName = context.packageName
                                 val intent = param.args[0] as? Intent ?: return@hookBefore
-                                val targetPackage = intent.component?.packageName ?: intent.`package` ?: return@hookBefore
 
-                                if (service.shouldHide(callerPackageName, targetPackage)) {
-                                    logI(TAG, "Blocked startActivity for $targetPackage from $callerPackageName")
-                                    param.throwable = ActivityNotFoundException("Activity not found for $targetPackage")
+                                val appConfig = service.config.scope[callerPackageName]
+                                val isCallerHooked = appConfig != null
+                                val isInWhitelistMode = appConfig?.useWhitelist == true
+
+                                if (!isCallerHooked) {
+                                    return@hookBefore
                                 }
-                            }.onFailure {
-                                logE(TAG, "Error in hook", it)
+
+                                if (isInWhitelistMode) {
+                                    logD(TAG, "Allowing startActivity from $callerPackageName (whitelist mode). Intent: $intent. PMS hooks will handle resolution filtering if applicable.")
+                                    return@hookBefore
+                                }
+
+                                val targetPackageNameFromIntent: String? = intent.component?.packageName ?: intent.`package`
+                                if (service.shouldHide(callerPackageName, targetPackageNameFromIntent)) {
+                                    val intentDescription = intent.toString()
+                                    val targetDescription = targetPackageNameFromIntent!!
+
+                                    if (intent.isWebIntent()) {
+                                        logI(TAG, "Blocked web intent from $callerPackageName to $targetDescription. Intent: $intentDescription. (HMA Policy for non-whitelist mode)")
+                                        param.throwable = ActivityNotFoundException("No Activity found to handle $intent (web intent blocked by HMA rules for $callerPackageName)")
+                                    } else {
+                                        logI(TAG, "Blocked non-web intent from $callerPackageName to $targetDescription. Intent: $intentDescription. (HMA Policy for non-whitelist mode)")
+                                        param.throwable = ActivityNotFoundException("No Activity found to handle $intent (intent blocked by HMA rules for $callerPackageName)")
+                                    }
+                                }
+                            }.onFailure { error ->
+                                val intentInfo = param.args?.getOrNull(0)?.toString() ?: "N/A"
+                                val currentCaller = (param.thisObject as? Context)?.packageName ?: "UnknownCaller"
+                                logE(TAG, "Error in StartActivityHook's hooked logic for $currentCaller (Intent: $intentInfo)", error)
                             }
                         }
+                        logD(TAG, "Hooked ${clazz.name}#$methodName(${signature.joinToString { it.simpleName }})")
+                    }.onFailure { error ->
+                        logE(TAG, "Failed to hook ${clazz.name}#$methodName(${signature.joinToString { it.simpleName }})", error)
                     }
                 }
             }
         }
+        if (hooks.isEmpty()) {
+            logI(TAG, "StartActivityHook loaded, but no methods were successfully hooked.")
+        } else {
+            logI(TAG, "StartActivityHook loaded ${hooks.size} method hooks.")
+        }
     }
 
     override fun unload() {
-        hooks.forEach { it.unhook() }
-        hooks.clear()
+        if (hooks.isNotEmpty()) {
+            logI(TAG, "Unload StartActivityHook, unhooking ${hooks.size} methods.")
+            hooks.forEach { it.unhook() }
+            hooks.clear()
+        } else {
+            logI(TAG, "Unload StartActivityHook, no hooks were active to unhook.")
+        }
     }
-
-    override fun onConfigChanged() {}
 }
