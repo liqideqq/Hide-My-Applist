@@ -124,8 +124,6 @@ class HMAService(val pms: IPackageManager) : IHMAService.Stub() {
             frameworkHooks.add(PmsHookTarget33(this))
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             frameworkHooks.add(PmsHookTarget30(this))
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            frameworkHooks.add(PmsHookTarget29(this))
         } else {
             frameworkHooks.add(PmsHookTarget28(this))
         }
@@ -137,7 +135,7 @@ class HMAService(val pms: IPackageManager) : IHMAService.Stub() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             frameworkHooks.add(StartActivityHook(this))
         }
-        
+
         frameworkHooks.forEach(IFrameworkHook::load)
         logI(TAG, "Hooks installed")
     }
