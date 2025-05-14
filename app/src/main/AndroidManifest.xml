@@ -47,9 +47,6 @@
             tools:ignore="ExportedContentProvider" />
 
         <meta-data
-            android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-7935522387526005~2750782344" />
-        <meta-data
             android:name="xposedmodule"
             android:value="true" />
         <meta-data
