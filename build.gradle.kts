@@ -6,7 +6,6 @@ plugins {
     alias(libs.plugins.kotlin) apply false
     alias(libs.plugins.agp.app) apply false
     alias(libs.plugins.agp.lib) apply false
-    alias(libs.plugins.gms) apply false
     alias(libs.plugins.nav.safeargs.kotlin) apply false
 }
 
