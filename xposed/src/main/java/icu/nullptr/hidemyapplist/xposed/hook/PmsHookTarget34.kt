@@ -59,7 +59,7 @@ class PmsHookTarget34(private val service: HMAService) : IFrameworkHook {
         }
         // AOSP exploit - https://github.com/aosp-mirror/platform_frameworks_base/commit/5bc482bd99ea18fe0b4064d486b29d5ae2d65139
         // Only 14 QPR2+ has this method
-        exphook = findMethodOrNull("com.android.server.pm.ComputerEngineImpl", findSuper = true) {
+        exphook = findMethodOrNull("com.android.server.pm.PackageManagerService", findSuper = true) {
             name == "getArchivedPackageInternal"
         }?.hookBefore { param ->
             runCatching {
